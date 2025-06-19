@@ -109,3 +109,110 @@
     source: principal, ;; Oracle source address
   }
 )
+
+;; Allowed trading pairs and symbols
+(define-map allowed-symbols
+  (string-ascii 10)
+  bool
+)
+
+;; STATE VARIABLES
+
+;; Unique identifier counter for new options
+(define-data-var next-option-id uint u1)
+
+;; Protocol governance and fee management
+(define-data-var contract-owner principal tx-sender)
+(define-data-var protocol-fee-rate uint u100) ;; 1% = 100 basis points
+
+;; UTILITY FUNCTIONS
+
+;; Returns the minimum of two values
+(define-private (get-min
+    (a uint)
+    (b uint)
+  )
+  (if (< a b)
+    a
+    b
+  )
+)
+
+;; Validates principal address for security
+(define-private (is-valid-principal (address principal))
+  (and
+    (not (is-eq address (as-contract tx-sender))) ;; Can't be the contract itself
+    (not (is-eq address .base)) ;; Can't be base contract
+    (not (is-eq address tx-sender)) ;; Can't be the owner
+    true
+  )
+)
+
+;; Validates symbol string format
+(define-private (is-valid-symbol (symbol (string-ascii 10)))
+  (and
+    (not (is-eq symbol "")) ;; Can't be empty
+    (not (is-eq symbol " ")) ;; Can't be just whitespace
+    (>= (len symbol) u2) ;; Must be at least 2 characters
+  )
+)
+
+;; Checks if token is approved for use as collateral
+(define-private (is-approved-token (token principal))
+  (default-to false (map-get? approved-tokens token))
+)
+
+;; Checks if price feed symbol is allowed
+(define-private (is-allowed-symbol (symbol (string-ascii 10)))
+  (default-to false (map-get? allowed-symbols symbol))
+)
+
+;; Checks if token is critical to platform operation
+(define-private (is-critical-token (token principal))
+  (or
+    (is-eq token .wrapped-btc)
+    (is-eq token .wrapped-stx)
+  )
+)
+
+;; Checks if symbol is critical to platform operation
+(define-private (is-critical-symbol (symbol (string-ascii 10)))
+  (or
+    (is-eq symbol "BTC-USD")
+    (is-eq symbol "STX-USD")
+  )
+)
+
+;; CORE OPTION MECHANICS
+
+;; Validates collateral requirements based on option type and market conditions
+(define-private (check-collateral-requirement
+    (amount uint)
+    (strike uint)
+    (option-type (string-ascii 4))
+  )
+  (if (is-eq option-type "CALL")
+    (>= amount strike)
+    (>= amount (/ (* strike u100000000) (get-current-price)))
+  )
+)
+
+;; Retrieves current market price from oracle
+(define-private (get-current-price)
+  (get price (unwrap! (map-get? price-feeds "BTC-USD") u0))
+)
+
+;; Helper function to extract option ID from option data
+(define-private (get-option-id (option {
+  writer: principal,
+  holder: (optional principal),
+  collateral-amount: uint,
+  strike-price: uint,
+  premium: uint,
+  expiry: uint,
+  is-exercised: bool,
+  option-type: (string-ascii 4),
+  state: (string-ascii 9),
+}))
+  (var-get next-option-id)
+)
