@@ -216,3 +216,148 @@
 }))
   (var-get next-option-id)
 )
+
+;; OPTION EXERCISE LOGIC
+
+;; Processes exercise of CALL options with profit calculation
+(define-private (exercise-call
+    (token <sip-010-trait>)
+    (option {
+      writer: principal,
+      holder: (optional principal),
+      collateral-amount: uint,
+      strike-price: uint,
+      premium: uint,
+      expiry: uint,
+      is-exercised: bool,
+      option-type: (string-ascii 4),
+      state: (string-ascii 9),
+    })
+    (current-price uint)
+  )
+  (let (
+      (profit (- current-price (get strike-price option)))
+      (payout (get-min profit (get collateral-amount option)))
+    )
+    ;; Transfer payout to option holder
+    (try! (as-contract (contract-call? token transfer payout tx-sender
+      (unwrap! (get holder option) ERR-NOT-AUTHORIZED) none
+    )))
+    ;; Return remaining collateral to option writer
+    (try! (as-contract (contract-call? token transfer (- (get collateral-amount option) payout)
+      tx-sender (get writer option) none
+    )))
+    ;; Update option state to exercised
+    (map-set options (get-option-id option)
+      (merge option {
+        is-exercised: true,
+        state: "EXERCISED",
+      })
+    )
+    (ok true)
+  )
+)
+
+;; Processes exercise of PUT options with profit calculation
+(define-private (exercise-put
+    (token <sip-010-trait>)
+    (option {
+      writer: principal,
+      holder: (optional principal),
+      collateral-amount: uint,
+      strike-price: uint,
+      premium: uint,
+      expiry: uint,
+      is-exercised: bool,
+      option-type: (string-ascii 4),
+      state: (string-ascii 9),
+    })
+    (current-price uint)
+  )
+  (let (
+      (profit (- (get strike-price option) current-price))
+      (payout (get-min profit (get collateral-amount option)))
+    )
+    ;; Transfer payout to option holder
+    (try! (as-contract (contract-call? token transfer payout tx-sender
+      (unwrap! (get holder option) ERR-NOT-AUTHORIZED) none
+    )))
+    ;; Return remaining collateral to option writer
+    (try! (as-contract (contract-call? token transfer (- (get collateral-amount option) payout)
+      tx-sender (get writer option) none
+    )))
+    ;; Update option state to exercised
+    (map-set options (get-option-id option)
+      (merge option {
+        is-exercised: true,
+        state: "EXERCISED",
+      })
+    )
+    (ok true)
+  )
+)
+
+;; PUBLIC FUNCTIONS - OPTION TRADING
+
+;; Creates a new option contract with specified parameters
+;; Writers lock collateral and set terms for potential buyers
+(define-public (write-option
+    (token <sip-010-trait>)
+    (collateral-amount uint)
+    (strike-price uint)
+    (premium uint)
+    (expiry uint)
+    (option-type (string-ascii 4))
+  )
+  (let (
+      (option-id (var-get next-option-id))
+      (current-time stacks-block-height)
+      (token-principal (contract-of token))
+    )
+    ;; Comprehensive validation of option parameters
+    (asserts! (is-approved-token token-principal) ERR-INVALID-TOKEN)
+    (asserts! (> expiry current-time) ERR-INVALID-EXPIRY)
+    (asserts! (> strike-price u0) ERR-INVALID-STRIKE-PRICE)
+    (asserts! (> premium u0) ERR-INVALID-PREMIUM)
+    (asserts!
+      (check-collateral-requirement collateral-amount strike-price option-type)
+      ERR-INSUFFICIENT-COLLATERAL
+    )
+    ;; Lock collateral from option writer
+    (try! (contract-call? token transfer collateral-amount tx-sender
+      (as-contract tx-sender) none
+    ))
+    ;; Create new option entry
+    (map-set options option-id {
+      writer: tx-sender,
+      holder: none,
+      collateral-amount: collateral-amount,
+      strike-price: strike-price,
+      premium: premium,
+      expiry: expiry,
+      is-exercised: false,
+      option-type: option-type,
+      state: "ACTIVE",
+    })
+    ;; Update writer's position tracking
+    (let ((current-position (default-to {
+        written-options: (list),
+        held-options: (list),
+        total-collateral-locked: u0,
+      }
+        (map-get? user-positions tx-sender)
+      )))
+      (map-set user-positions tx-sender
+        (merge current-position {
+          written-options: (unwrap-panic (as-max-len? (append (get written-options current-position) option-id)
+            u10
+          )),
+          total-collateral-locked: (+ (get total-collateral-locked current-position) collateral-amount),
+        })
+      )
+    )
+    ;; Increment option ID counter for next option
+    (var-set next-option-id (+ option-id u1))
+    (ok option-id)
+  )
+)
