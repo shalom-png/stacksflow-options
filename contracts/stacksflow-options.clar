@@ -361,3 +361,152 @@
     (ok option-id)
   )
 )
+
+;; Purchases an existing option contract by paying the premium
+;; Transfers ownership from writer to buyer
+(define-public (buy-option
+    (token <sip-010-trait>)
+    (option-id uint)
+  )
+  (let (
+      (option (unwrap! (map-get? options option-id) ERR-OPTION-NOT-FOUND))
+      (premium (get premium option))
+      (token-principal (contract-of token))
+    )
+    ;; Validate purchase conditions
+    (asserts! (is-approved-token token-principal) ERR-INVALID-TOKEN)
+    (asserts! (is-none (get holder option)) ERR-ALREADY-EXERCISED)
+    (asserts! (< stacks-block-height (get expiry option)) ERR-OPTION-EXPIRED)
+    ;; Transfer premium from buyer to writer
+    (try! (contract-call? token transfer premium tx-sender (get writer option) none))
+    ;; Update option with new holder
+    (map-set options option-id (merge option { holder: (some tx-sender) }))
+    ;; Update buyer's position tracking
+    (let ((current-position (default-to {
+        written-options: (list),
+        held-options: (list),
+        total-collateral-locked: u0,
+      }
+        (map-get? user-positions tx-sender)
+      )))
+      (map-set user-positions tx-sender
+        (merge current-position { held-options: (unwrap-panic (as-max-len? (append (get held-options current-position) option-id) u10)) })
+      )
+    )
+    (ok true)
+  )
+)
+
+;; Exercises an option contract if profitable
+;; Calculates payout based on current market price vs strike price
+(define-public (exercise-option
+    (token <sip-010-trait>)
+    (option-id uint)
+  )
+  (let (
+      (option (unwrap! (map-get? options option-id) ERR-OPTION-NOT-FOUND))
+      (current-price (get-current-price))
+      (token-principal (contract-of token))
+    )
+    ;; Validate exercise conditions
+    (asserts! (is-approved-token token-principal) ERR-INVALID-TOKEN)
+    (asserts! (is-eq (some tx-sender) (get holder option)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get is-exercised option)) ERR-ALREADY-EXERCISED)
+    (asserts! (< stacks-block-height (get expiry option)) ERR-OPTION-EXPIRED)
+    ;; Route to appropriate exercise function based on option type
+    (if (is-eq (get option-type option) "CALL")
+      (exercise-call token option current-price)
+      (exercise-put token option current-price)
+    )
+  )
+)
+
+;; READ-ONLY FUNCTIONS - INFORMATION QUERIES
+
+;; Retrieves complete option details by ID
+(define-read-only (get-option (option-id uint))
+  (map-get? options option-id)
+)
+
+;; Gets user's complete position information
+(define-read-only (get-user-position (user principal))
+  (map-get? user-positions user)
+)
+
+;; Returns current protocol fee rate
+(define-read-only (get-protocol-fee-rate)
+  (var-get protocol-fee-rate)
+)
+
+;; ADMIN FUNCTIONS - PROTOCOL GOVERNANCE
+
+;; Updates protocol fee rate (owner only)
+(define-public (set-protocol-fee-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (<= new-rate u1000) ERR-INVALID-PREMIUM) ;; Maximum 10%
+    (var-set protocol-fee-rate new-rate)
+    (ok true)
+  )
+)
+
+;; Updates price feed data from authorized oracles
+(define-public (update-price-feed
+    (symbol (string-ascii 10))
+    (price uint)
+    (timestamp uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-allowed-symbol symbol) ERR-INVALID-SYMBOL)
+    (asserts! (>= timestamp stacks-block-height) ERR-INVALID-TIMESTAMP)
+    (asserts! (> price u0) ERR-INVALID-STRIKE-PRICE)
+    (map-set price-feeds symbol {
+      price: price,
+      timestamp: timestamp,
+      source: tx-sender,
+    })
+    (ok true)
+  )
+)
+
+;; Manages approved token whitelist for collateral
+(define-public (set-approved-token
+    (token principal)
+    (approved bool)
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-principal token) ERR-INVALID-ADDRESS)
+    (asserts! (not (is-eq token .base)) ERR-INVALID-TOKEN)
+    ;; Prevent removal of critical tokens
+    (asserts! (or
+      approved
+      (not (is-critical-token token))
+    )
+      ERR-NOT-AUTHORIZED
+    )
+    (map-set approved-tokens token approved)
+    (ok true)
+  )
+)
+
+;; Manages allowed trading symbols for price feeds
+(define-public (set-allowed-symbol
+    (symbol (string-ascii 10))
+    (allowed bool)
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-valid-symbol symbol) ERR-EMPTY-SYMBOL)
+    ;; Prevent removal of critical symbols
+    (asserts! (or
+      allowed
+      (not (is-critical-symbol symbol))
+    )
+      ERR-NOT-AUTHORIZED
+    )
+    (map-set allowed-symbols symbol allowed)
+    (ok true)
+  )
+)
